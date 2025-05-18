@@ -380,109 +380,106 @@ struct CameraView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {}
 
     class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
-        var captureSession: AVCaptureSession!
-        var previewLayer: AVCaptureVideoPreviewLayer!
+        var captureSession: AVCaptureSession?
+        var previewLayer: AVCaptureVideoPreviewLayer?
         let speechSynthesizer = AVSpeechSynthesizer()
         var lastSpokenLabel: String?
-
-        
-        
-        /// Dice SOLAMENTE estas etiquetas
+    
         let etiquetasPermitidas: Set<String> = ["person", "car", "chair", "cat", "dog"]
-
-        /// Traduce del inglés al español las etiquetas
         let traducciones: [String: String] = [
-            "person": "persona",
-            "car": "carro",
-            "chair": "silla",
-            "cat": "gato",
-            "dog": "perro"
+            "person": "persona", "car": "carro", "chair": "silla", "cat": "gato", "dog": "perro"
         ]
-
-        /// Indica el género de la palabra en español
         let generos: [String: String] = [
-            "persona": "f", // femenino
-            "carro": "m",   // masculino
-            "silla": "f",
-            "gato": "m",
-            "perro": "m"
+            "persona": "f", "carro": "m", "silla": "f", "gato": "m", "perro": "m"
         ]
         
-        override func viewDidLoad() {
-            super.viewDidLoad()
-            setupCamera()
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            setupCamera() // Activamos cámara al entrar
         }
-
+    
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            stopCamera() // Detenemos al salir
+        }
+    
         func setupCamera() {
+            guard captureSession == nil else { return } // Evitar duplicación
+    
             captureSession = AVCaptureSession()
-            captureSession.sessionPreset = .high
-            
-            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-                print("No se pudo acceder a la cámara")
+            captureSession?.sessionPreset = .high
+    
+            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                  let input = try? AVCaptureDeviceInput(device: camera),
+                  let session = captureSession else {
+                print("No se pudo configurar la cámara.")
                 return
             }
-
-            do {
-                let input = try AVCaptureDeviceInput(device: camera)
-                if captureSession.canAddInput(input) {
-                    captureSession.addInput(input)
-                }
-                
-                let output = AVCaptureVideoDataOutput()
-                output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
-                if captureSession.canAddOutput(output) {
-                    captureSession.addOutput(output)
-                }
-                
-                previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-                previewLayer.videoGravity = .resizeAspectFill
-                previewLayer.frame = view.layer.bounds
+    
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+    
+            let output = AVCaptureVideoDataOutput()
+            output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+    
+            previewLayer = AVCaptureVideoPreviewLayer(session: session)
+            previewLayer?.videoGravity = .resizeAspectFill
+            previewLayer?.frame = view.bounds
+            if let previewLayer = previewLayer {
                 view.layer.addSublayer(previewLayer)
-
-                DispatchQueue.global(qos: .background).async {
-                    self.captureSession.startRunning()
-                }
-                
-            } catch {
-                print("Error al configurar la cámara: \(error)")
+            }
+    
+            DispatchQueue.global(qos: .userInitiated).async {
+                session.startRunning()
             }
         }
-
+    
+        func stopCamera() {
+            captureSession?.stopRunning()
+            captureSession = nil
+    
+            DispatchQueue.main.async {
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+            }
+        }
+    
         func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            
-            DispatchQueue.global(qos: .userInitiated).async {
-                let observations = ObjectDetector.shared.detectObjects(pixelBuffer: pixelBuffer)
-                DispatchQueue.main.async {
-                    self.drawBoundingBoxes(for: observations)
-                    self.announceDetectedObjects(observations)
-                }
+    
+            let observations = ObjectDetector.shared.detectObjects(pixelBuffer: pixelBuffer)
+            DispatchQueue.main.async {
+                self.drawBoundingBoxes(for: observations)
+                self.announceDetectedObjects(observations)
             }
         }
-
+    
         func drawBoundingBoxes(for observations: [VNRecognizedObjectObservation]) {
             DispatchQueue.main.async {
-                self.view.layer.sublayers?.removeSubrange(1...)
+                self.view.layer.sublayers?.removeSubrange(1...) // Elimina todos menos el previewLayer
             }
-            
+    
             for observation in observations {
                 guard let label = observation.labels.first?.identifier,
                       etiquetasPermitidas.contains(label) else { continue }
-
+    
                 let boundingBox = observation.boundingBox
-                
                 let frame = CGRect(
                     x: boundingBox.origin.x * self.view.frame.width,
                     y: (1 - boundingBox.origin.y - boundingBox.height) * self.view.frame.height,
                     width: boundingBox.width * self.view.frame.width,
                     height: boundingBox.height * self.view.frame.height
                 )
-
+    
                 let boxLayer = CALayer()
                 boxLayer.frame = frame
                 boxLayer.borderColor = UIColor.red.cgColor
                 boxLayer.borderWidth = 2.0
-
+    
                 let textLayer = CATextLayer()
                 let etiquetaTraducida = traducciones[label] ?? label
                 textLayer.string = etiquetaTraducida.capitalized
@@ -491,47 +488,39 @@ struct CameraView: UIViewControllerRepresentable {
                 textLayer.frame = CGRect(x: frame.origin.x, y: frame.origin.y - 20, width: frame.width, height: 20)
                 textLayer.backgroundColor = UIColor.black.withAlphaComponent(0.7).cgColor
                 textLayer.alignmentMode = .center
-
+    
                 DispatchQueue.main.async {
                     self.view.layer.addSublayer(boxLayer)
                     self.view.layer.addSublayer(textLayer)
                 }
             }
         }
-
-        
-        ///Anuncia los objetos detectados en español
+    
         func announceDetectedObjects(_ observations: [VNRecognizedObjectObservation]) {
-            // Si no hay ninguna etiqueta permitida en la imagen, no decimos nada
             guard let observation = observations.first(where: { etiquetasPermitidas.contains($0.labels.first?.identifier ?? "") }) else {
                 lastSpokenLabel = nil
                 return
             }
-
+    
             let originalLabel = observation.labels.first?.identifier ?? "Desconocido"
-            
             guard etiquetasPermitidas.contains(originalLabel) else { return }
-
+    
             let translatedLabel = traducciones[originalLabel] ?? originalLabel
             let genero = generos[translatedLabel] ?? "m"
             let articulo = (genero == "f") ? "una" : "un"
-
+    
             let mensaje = "Tienes \(articulo) \(translatedLabel) al frente"
-
-            // 👉 Siempre que haya un box, se va a decir en voz alta, sin importar si es repetido
             let utterance = AVSpeechUtterance(string: mensaje)
             utterance.voice = AVSpeechSynthesisVoice(language: "es-US")
             utterance.rate = 0.5
-
-            // Detenemos lo anterior si sigue hablando (opcional, puedes comentar esta línea si prefieres que se sobrepongan)
+    
             if speechSynthesizer.isSpeaking {
                 speechSynthesizer.stopSpeaking(at: .immediate)
             }
-
+    
             speechSynthesizer.speak(utterance)
             lastSpokenLabel = translatedLabel
         }
-
     }
 }
 
