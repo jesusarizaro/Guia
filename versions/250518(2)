@@ -10,6 +10,8 @@ import CoreLocation
 import Combine
 import AVFoundation
 
+import Speech
+
 
 
 struct ContentView: View {
@@ -25,6 +27,9 @@ struct ContentView: View {
     
     @State private var destinoExpandido = false
     @State private var destinoSeleccionado = "Destino"
+
+    @StateObject private var recognizer = SpeechRecognizer()
+
 
     let destinosDisponibles = [
         "Destino", "Bloque A", "Bloque B", "Bloque C",
@@ -201,7 +206,20 @@ struct ContentView: View {
                         HStack {
                             Spacer()
                             Button(action: {
-                                // Acción pendiente
+                                recognizer.onFinalTexto = { texto in
+                                    GuiaAPI.shared.enviarMensaje(texto) { respuesta in
+                                        self.respuestaDeGuia = respuesta
+                            
+                                        // 🔊 Decir la respuesta en voz
+                                        let utterance = AVSpeechUtterance(string: respuesta)
+                                        utterance.voice = AVSpeechSynthesisVoice(language: "es-ES")
+                                        utterance.rate = 0.5
+                                        let synthesizer = AVSpeechSynthesizer()
+                                        synthesizer.speak(utterance)
+                                    }
+                                }
+                            
+                                recognizer.comenzarReconocimiento()
                             }) {
                                 Image(systemName: "mic.fill")
                                     .font(.system(size: 25))
@@ -298,20 +316,6 @@ struct ContentView: View {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 struct RoundedCorner: Shape {
     var radius: CGFloat = .infinity
     var corners: UIRectCorner = .allCorners
@@ -337,13 +341,123 @@ extension View {
 
 
 
+class GuiaAPI {
+    static let shared = GuiaAPI()
+    
+    private let url = URL(string: "http://TÚ_IP_AQUÍ:2500/ask")! // <- Cambia esta IP
+
+    func enviarMensaje(_ mensaje: String, completion: @escaping (String) -> Void) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let json: [String: String] = ["mensaje": mensaje]
+        let jsonData = try? JSONSerialization.data(withJSONObject: json)
+
+        request.httpBody = jsonData
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let respuesta = try? JSONDecoder().decode([String: String].self, from: data),
+                  let mensajeRespuesta = respuesta["respuesta"] else {
+                print("Error al recibir respuesta: \(error?.localizedDescription ?? "desconocido")")
+                completion("No se recibió respuesta.")
+                return
+            }
+
+            DispatchQueue.main.async {
+                completion(mensajeRespuesta)
+            }
+        }.resume()
+    }
+}
 
 
 
+class SpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es-ES"))!
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
 
+    private var silencioTimer: Timer?
+    private let tiempoSilencio: TimeInterval = 1.5  // segundos sin hablar = silencio
 
+    @Published var textoReconocido = ""
+    var onFinalTexto: ((String) -> Void)?  // Este callback se llama cuando termina
 
+    func comenzarReconocimiento() {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            guard authStatus == .authorized else {
+                print("Permiso no autorizado.")
+                return
+            }
 
+            DispatchQueue.main.async {
+                self.empezarGrabacion()
+            }
+        }
+    }
+
+    func empezarGrabacion() {
+        if audioEngine.isRunning {
+            detenerReconocimiento()
+            return
+        }
+
+        request = SFSpeechAudioBufferRecognitionRequest()
+        guard let inputNode = audioEngine.inputNode else {
+            fatalError("No se encontró inputNode.")
+        }
+        guard let request = request else { return }
+
+        request.shouldReportPartialResults = true
+
+        recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+            if let result = result {
+                let nuevoTexto = result.bestTranscription.formattedString
+                self.textoReconocido = nuevoTexto
+                self.reiniciarTimerSilencio()
+            }
+
+            if let error = error {
+                print("Error: \(error.localizedDescription)")
+                self.detenerReconocimiento()
+            }
+        }
+
+        let formato = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: formato) { buffer, _ in
+            self.request?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try? audioEngine.start()
+    }
+
+    func detenerReconocimiento() {
+        audioEngine.stop()
+        request?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        reconocimientoFinalizado()
+    }
+
+    func reiniciarTimerSilencio() {
+        silencioTimer?.invalidate()
+        silencioTimer = Timer.scheduledTimer(withTimeInterval: tiempoSilencio, repeats: false) { _ in
+            self.detenerReconocimiento()
+        }
+    }
+
+    func reconocimientoFinalizado() {
+        DispatchQueue.main.async {
+            let textoFinal = self.textoReconocido.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !textoFinal.isEmpty {
+                self.onFinalTexto?(textoFinal)
+            }
+        }
+    }
+}
 
 
 
@@ -511,7 +625,7 @@ struct CameraView: UIViewControllerRepresentable {
     
             let mensaje = "Tienes \(articulo) \(translatedLabel) al frente"
             let utterance = AVSpeechUtterance(string: mensaje)
-            utterance.voice = AVSpeechSynthesisVoice(language: "es-US")
+            utterance.voice = AVSpeechSynthesisVoice(language: "es-ES")
             utterance.rate = 0.5
     
             if speechSynthesizer.isSpeaking {
