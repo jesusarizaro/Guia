@@ -1,3 +1,8 @@
+//Cámara: funciona
+//Destinos: guardar en el recuadro amarillo los destinos
+//Asistente: escucha, manda al server, y responde (pone en el recuadro amarrillo la respuesta)
+//Info: Normal
+
 import Vision
 import CoreML
 import AVFoundation
