@@ -317,11 +317,13 @@ struct ContentView: View {
                 decirEnVozAlta("Hola, soy Guía de Uninorte. A dónde quieres ir?") // 👋 Saludo inicial
             }
 
-            .onChange(of: respuestaDeGuia) { nuevoTexto in
-                if !nuevoTexto.isEmpty {
-                    decirEnVozAlta(nuevoTexto)
+            .onChange(of: respuestaDeGuia) {
+                if !respuestaDeGuia.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    decirEnVozAlta(respuestaDeGuia)
                 }
-            }  
+
+            }
+ 
         }
     }
 }
@@ -334,20 +336,22 @@ struct ContentView: View {
 
 
 
-
-
-
-
 func decirEnVozAlta(_ texto: String) {
-    let utterance = AVSpeechUtterance(string: texto)
+    let textoLimpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !textoLimpio.isEmpty else { return }
+
+    let utterance = AVSpeechUtterance(string: textoLimpio)
     utterance.voice = AVSpeechSynthesisVoice(language: "es-ES")
     utterance.rate = 0.5
 
     if sintetizadorGlobal.isSpeaking {
         sintetizadorGlobal.stopSpeaking(at: .immediate)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            sintetizadorGlobal.speak(utterance)
+        }
+    } else {
+        sintetizadorGlobal.speak(utterance)
     }
-
-    sintetizadorGlobal.speak(utterance)
 }
 
 
