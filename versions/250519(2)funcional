@@ -336,7 +336,7 @@ struct ContentView: View {
 
 
 
-
+//MARK: - DEL JSON, TOMA SOLAMENTE EL "response", LO LIMPIA Y LO PREPARA LA DICTAR
 func prepararTextoParaHablar(_ texto: String) -> String {
     let limpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -348,8 +348,7 @@ func prepararTextoParaHablar(_ texto: String) -> String {
     return String(String.UnicodeScalarView(textoFiltrado))
 }
 
-
-
+//MARK: - DICTADO POR VOZ
 func decirEnVozAlta(_ texto: String) {
     let textoLimpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !textoLimpio.isEmpty else { return }
@@ -379,7 +378,7 @@ func decirEnVozAlta(_ texto: String) {
 
 
 
-
+//MARK: - BORDES REDONDOS EN EL FRONT PARA EL RECUADRO AMARILLO
 struct RoundedCorner: Shape {
     var radius: CGFloat = .infinity
     var corners: UIRectCorner = .allCorners
@@ -404,7 +403,7 @@ extension View {
 
 
 
-
+//MARK: - COMUNICACION CON EL SERVIDOR
 class GuiaAPI {
     static let shared = GuiaAPI()
     
@@ -461,7 +460,7 @@ class GuiaAPI {
 }
 
 
-
+//MARK: - RECONOCIMIENTO DE VOZ
 class SpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es"))!
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -573,7 +572,7 @@ class SpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
 
 
 
-
+//MARK: - MAPA
 struct MapViewRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
