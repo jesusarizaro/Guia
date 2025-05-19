@@ -1,0 +1,816 @@
+
+import Vision
+import CoreML
+import AVFoundation
+import SwiftUI
+
+
+import MapKit
+import CoreLocation
+import Combine
+import AVFoundation
+
+import Speech
+
+let sintetizadorGlobal = AVSpeechSynthesizer()
+
+//MARK: - Vista principal
+struct ContentView: View {
+    enum VistaActiva {
+        case camara, destino, asistente, informacion
+    }
+    
+    @State private var vistaActiva: VistaActiva = .asistente // 👈 Inicia en Asistente
+    @State private var decirPies: String = ""
+    @State private var giro: String = ""
+    @State private var mostrarOpcionesDestino = false
+    @State private var respuestaDeGuia: String = "" // 👈 Mensaje dinámico del asistente
+    
+    @State private var respuestaParaHablar: String = ""
+
+    
+    @State private var destinoExpandido = false
+    @State private var destinoSeleccionado = "Destino"
+    
+    @State private var destinoDesdeServidor: String = ""
+
+
+    @StateObject private var recognizer = SpeechRecognizer()
+
+
+    let destinosDisponibles = [
+        "Destino", "Bloque A", "Bloque B", "Bloque C",
+        "Bloque D", "Coliseo", "Biblioteca", "Administración", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "asdf", "hola",
+    ]
+
+    var body: some View {
+        ZStack {
+            // Vista principal dinámica
+            Group {
+                switch vistaActiva {
+                case .camara:
+                    CameraView(vistaActiva: $vistaActiva)
+                        .edgesIgnoringSafeArea(.all)
+                default:
+                    MapViewRepresentable()
+                        .edgesIgnoringSafeArea(.all)
+                }
+            }
+            
+            /// recuadro de intrucciones
+            if vistaActiva != .informacion {
+                VStack {
+                    VStack(spacing: 10) {
+                        HStack {
+                            if giro.contains("izquierda") {
+                                Image(systemName: "arrow.turn.up.left")
+                                    .foregroundColor(.white)
+                            } else if giro.contains("derecha") {
+                                Image(systemName: "arrow.turn.up.right")
+                                    .foregroundColor(.white)
+                            } else if giro.contains("adelante") {
+                                Image(systemName: "arrow.up")
+                                    .foregroundColor(.white)
+                            } else {
+                                Image(systemName: "arrow.2.circlepath")
+                                    .foregroundColor(.white)
+                            }
+                            
+                            Text(giro.isEmpty ? "Instrucción de giro:" : giro)
+                                .font(.body)
+                                .foregroundColor(.black)
+                                .padding(10)
+                                .background(Color.yellow)
+                                .cornerRadius(20)
+                        }
+                        
+                        HStack {
+                            Image(systemName: "shoeprints.fill")
+                                .foregroundColor(.white)
+                            
+                            Text(decirPies.isEmpty ? "Distancia en pies hasta tu destino:" : decirPies)
+                                .font(.body)
+                                .foregroundColor(.black)
+                                .padding(10)
+                                .background(Color.yellow)
+                                .cornerRadius(20)
+                        }
+                    }
+                    .padding()
+                    .background(Color.black)
+                    .cornerRadius(35)
+                    .shadow(radius: 5)
+                    .padding(.top, 10) // ⬅️ Ajusta según altura del status bar
+                    Spacer() // Esto empuja el bloque hacia arriba
+                }
+            }
+            
+            
+            
+            if vistaActiva == .destino {
+                VStack {
+                    Spacer()
+                    
+                    ZStack(alignment: .bottomTrailing) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Selecciona un destino:")
+                                .font(.footnote)
+                                .foregroundColor(.black)
+                            
+                            if destinoExpandido {
+                                // 🔽 Lista con scroll limitada a 300 px
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        ForEach(destinosDisponibles, id: \.self) { destino in
+                                            Button(action: {
+                                                destinoSeleccionado = destino
+                                                destinoExpandido = false
+                                            }) {
+                                                Text(destino)
+                                                    .font(.body)
+                                                    .foregroundColor(.black)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .padding(.vertical, 8)
+                                            }
+                                            Rectangle()
+                                                .frame(height: 1)
+                                                .foregroundColor(.black.opacity(0.4))
+                                        }
+                                    }
+                                }
+                                .frame(height: 300)
+                            } else {
+                                Text(destinoSeleccionado)
+                                    .font(.body)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.black)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .lineLimit(nil)
+                                    .frame(maxWidth: UIScreen.main.bounds.width * 0.65, alignment: .leading)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 40)
+                        .padding(.bottom, 160)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.yellow)
+                        .cornerRadius(60, corners: [.topLeft, .topRight])
+                        .offset(y: 35)
+                        .animation(.easeInOut(duration: 0.3), value: destinoExpandido)
+                        
+                        // 🔁 Botón de flecha
+                        Button(action: {
+                            destinoExpandido.toggle()
+                        }) {
+                            Image(systemName: destinoExpandido ? "arrow.down" : "arrow.up")
+                                .font(.system(size: 25))
+                                .foregroundColor(.white)
+                                .padding(20)
+                                .background(Color.black)
+                                .clipShape(Circle())
+                                .shadow(radius: 6)
+                        }
+                        .padding(.trailing, 30)
+                        .padding(.bottom, 110)
+                    }
+                }
+            }
+            
+            
+            
+            // 🟡 Cuadro de asistente dinámico (solo si está activa la vista Asistente)
+            if vistaActiva == .asistente {
+                VStack {
+                    Spacer()
+                    // 🟡 Recuadro amarillo
+                    ZStack(alignment: .bottomTrailing) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Dile a Guía a dónde quieres ir:")
+                                .font(.footnote)
+                                .foregroundColor(.black)
+                            
+                            Text(respuestaDeGuia.isEmpty ? "Hola, soy Guía de Uninorte." : respuestaDeGuia)
+                                .font(.body)
+                                .fontWeight(.bold)
+                                .foregroundColor(.black)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(nil)
+                                .frame(maxWidth: UIScreen.main.bounds.width * 0.60, alignment: .leading)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 40)
+                        .padding(.bottom, 160)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.yellow)
+                        .cornerRadius(60, corners: [.topLeft, .topRight])
+                        .offset(y: 35)
+                        .animation(.easeInOut(duration: 0.3), value: vistaActiva)
+                    }
+                }
+                
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            recognizer.onFinalTexto = { texto in
+                                GuiaAPI.shared.enviarMensaje(texto) { respuesta, destino in
+                                    self.respuestaDeGuia = respuesta
+                                    self.respuestaParaHablar = prepararTextoParaHablar(respuesta)
+                                    self.destinoDesdeServidor = destino
+                                }
+                            }
+                            
+                            recognizer.comenzarReconocimiento()
+                        }) {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 25))
+                                .foregroundColor(.white)
+                                .padding(20)
+                                .background(recognizer.estaEscuchando ? Color.red : Color.black)
+                                .clipShape(Circle())
+                                .shadow(radius: 6)
+                        }
+                        .padding(.trailing, 30)   // 🔘 Igual que en tu imagen
+                        .padding(.bottom, 110)    // 🔘 Ajustado para flotar justo encima de la barra y el recuadro
+                    }
+                }
+            }
+            
+            
+            
+            
+            // 📖 Información
+            if vistaActiva == .informacion {
+                VStack {
+                    ScrollView {
+                        Text("Acerca de Guía\n\nEsta aplicación está diseñada para ayudarte a navegar usando instrucciones por voz y visión. Puedes usar la cámara para detectar obstáculos, seleccionar destinos o escribirlos directamente en el asistente. ¡Disfruta la experiencia!")
+                            .padding()
+                            .foregroundColor(.black)
+                    }
+                    .frame(maxHeight: 400)
+                    .background(Color.yellow)
+                    .cornerRadius(25)
+                    .padding()
+                    
+                    Spacer()
+                }
+            }
+            
+            // 🔻 Barra inferior con botones
+            VStack {
+                Spacer()
+                ZStack {
+                    Color.black.ignoresSafeArea(edges: .bottom)
+                    
+                    HStack(spacing: 50) {
+                        Button(action: {
+                            vistaActiva = .camara
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 25))
+                                Text("Cámara").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .destino
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "map.fill")
+                                    .font(.system(size: 25))
+                                Text("Destinos").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .asistente
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "person.wave.2.fill")
+                                    .font(.system(size: 25))
+                                Text("Asistente").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .informacion
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "info.circle.fill")
+                                    .font(.system(size: 25))
+                                Text("Info").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 350)
+                }
+                .frame(height: 90)
+            }
+            
+            
+            
+            .onAppear {
+                decirEnVozAlta("Hola!, soy Guía de Uninorte. A dónde quieres ir") // 👋 Saludo inicial
+            }
+
+            .onChange(of: respuestaParaHablar) { _, nueva in
+                if !nueva.isEmpty {
+                    print("🗣️ Texto que se va a decir: [\(nueva)]")
+                    decirEnVozAlta(nueva)
+                }
+            }
+
+
+
+
+        }
+    }
+}
+
+
+
+
+func prepararTextoParaHablar(_ texto: String) -> String {
+    let limpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // Elimina caracteres invisibles o de control (como \u{200B}, \u{FEFF}, etc)
+    let textoFiltrado = limpio.unicodeScalars.filter { scalar in
+        !(CharacterSet.controlCharacters.contains(scalar) || scalar == "\u{200B}" || scalar == "\u{FEFF}")
+    }
+
+    return String(String.UnicodeScalarView(textoFiltrado))
+}
+
+
+
+func decirEnVozAlta(_ texto: String) {
+    let textoLimpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !textoLimpio.isEmpty else { return }
+
+    let utterance = AVSpeechUtterance(string: textoLimpio)
+    utterance.voice = AVSpeechSynthesisVoice(language: "es-CO")
+    utterance.rate = 0.5
+
+    DispatchQueue.main.async {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+            try session.setActive(true)
+        } catch {
+            print("⚠️ Error al configurar la sesión de audio: \(error)")
+        }
+
+        sintetizadorGlobal.stopSpeaking(at: .immediate)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            sintetizadorGlobal.speak(utterance)
+        }
+    }
+}
+
+
+
+
+
+
+struct RoundedCorner: Shape {
+    var radius: CGFloat = .infinity
+    var corners: UIRectCorner = .allCorners
+
+    func path(in rect: CGRect) -> Path {
+        let path = UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners,
+            cornerRadii: CGSize(width: radius, height: radius)
+        )
+        return Path(path.cgPath)
+    }
+}
+
+extension View {
+    func cornerRadius(_ radius: CGFloat, corners: UIRectCorner) -> some View {
+        clipShape(RoundedCorner(radius: radius, corners: corners))
+    }
+}
+
+
+
+
+
+
+class GuiaAPI {
+    static let shared = GuiaAPI()
+    
+    private let url = URL(string: "http://54.147.252.121:2500/ask")! // <- Cambia esta IP
+
+    func enviarMensaje(_ mensaje: String, completion: @escaping (_ response: String, _ destino: String) -> Void) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let json: [String: String] = ["prompt": mensaje]
+        let jsonData = try? JSONSerialization.data(withJSONObject: json)
+        request.httpBody = jsonData
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data else {
+                print("❌ Sin datos: \(error?.localizedDescription ?? "error desconocido")")
+                completion("No se recibió respuesta.", "")
+                return
+            }
+
+            do {
+                // Intenta convertir la respuesta en un diccionario
+                if let respuesta = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let mensajeRespuesta = respuesta["response"] as? String {
+
+                    // ✅ "destino" puede venir o no
+                    let destino = respuesta["destino"] as? String ?? ""
+
+                    // 🧪 Imprimir el JSON completo recibido
+                    print("🧾 JSON recibido: \(respuesta)")
+
+                    DispatchQueue.main.async {
+                        let limpio = mensajeRespuesta.components(separatedBy: "{\"destino\"").first ?? mensajeRespuesta
+                        let respuestaLimpia = limpio.trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        //decirEnVozAlta(respuestaLimpia) // 🔊 Hablar la respuesta
+                        completion(respuestaLimpia, destino)
+                    }
+
+
+                } else {
+                    // Si no se puede interpretar correctamente el JSON
+                    print("⚠️ JSON inesperado: \(String(data: data, encoding: .utf8) ?? "sin texto")")
+                    completion("Respuesta no entendida.", "")
+                }
+            } catch {
+                // Si hubo un error al decodificar el JSON
+                print("❌ Error al parsear JSON: \(error.localizedDescription)")
+                completion("Error al interpretar respuesta.", "")
+            }
+        }.resume()
+    }
+}
+
+
+
+class SpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es"))!
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
+
+    private var silencioTimer: Timer?
+    private let tiempoSilencio: TimeInterval = 1  // segundos sin hablar = silencio
+
+    private var yaSeRespondio = false
+
+    
+    @Published var estaEscuchando = false  // 👈 Añadido
+    
+    @Published var textoReconocido = ""
+    var onFinalTexto: ((String) -> Void)?  // Este callback se llama cuando termina
+
+    func comenzarReconocimiento() {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            guard authStatus == .authorized else {
+                print("Permiso no autorizado.")
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.estaEscuchando = true // 👂 Comienza a escuchar
+                self.empezarGrabacion()
+            }
+        }
+    }
+
+    func empezarGrabacion() {
+        
+        yaSeRespondio = false
+        
+        if audioEngine.isRunning {
+            detenerReconocimiento()
+            return
+        }
+
+        request = SFSpeechAudioBufferRecognitionRequest()
+        let inputNode = audioEngine.inputNode
+
+        guard let request = request else { return }
+
+        request.shouldReportPartialResults = true
+
+        recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+            if let result = result {
+                let nuevoTexto = result.bestTranscription.formattedString
+                self.textoReconocido = nuevoTexto
+                self.reiniciarTimerSilencio()
+            }
+
+            if let error = error {
+                print("Error: \(error.localizedDescription)")
+                self.detenerReconocimiento()
+            }
+        }
+
+        let formato = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: formato) { buffer, _ in
+            self.request?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try? audioEngine.start()
+    }
+
+    func detenerReconocimiento() {
+        audioEngine.stop()
+        request?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        self.estaEscuchando = false // 🔇 Deja de escuchar
+        reconocimientoFinalizado()
+    }
+
+    func reiniciarTimerSilencio() {
+        silencioTimer?.invalidate()
+        silencioTimer = Timer.scheduledTimer(withTimeInterval: tiempoSilencio, repeats: false) { _ in
+            self.detenerReconocimiento()
+        }
+    }
+
+    func reconocimientoFinalizado() {
+        DispatchQueue.main.async {
+            let textoFinal = self.textoReconocido.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !textoFinal.isEmpty {
+                
+                print("🎤 Texto reconocido final: \(textoFinal)")
+
+                
+                if !self.yaSeRespondio {
+                    self.yaSeRespondio = true
+                    self.onFinalTexto?(textoFinal)
+                }
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+struct MapViewRepresentable: UIViewRepresentable {
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView()
+        mapView.showsUserLocation = true
+        mapView.mapType = .satellite
+        return mapView
+    }
+
+    func updateUIView(_ uiView: MKMapView, context: Context) {}
+}
+
+
+
+
+
+//MARK: - CAMARA
+struct CameraView: UIViewControllerRepresentable {
+    @Binding var vistaActiva: ContentView.VistaActiva
+
+    func makeUIViewController(context: Context) -> CameraViewController {
+        let controller = CameraViewController()
+        controller.getVistaActiva = { self.vistaActiva }
+        return controller
+    }
+    func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {
+        uiViewController.getVistaActiva = { self.vistaActiva }
+    }
+    class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
+        var captureSession: AVCaptureSession?
+        var previewLayer: AVCaptureVideoPreviewLayer?
+        var lastSpokenLabel: String?
+        
+        var getVistaActiva: (() -> ContentView.VistaActiva)? // 👈 Aquí recibimos el estado actual
+
+    
+        let etiquetasPermitidas: Set<String> = ["person", "car", "chair", "cat", "dog"]
+        let traducciones: [String: String] = [
+            "person": "persona", "car": "carro", "chair": "silla", "cat": "gato", "dog": "perro"
+        ]
+        let generos: [String: String] = [
+            "persona": "f", "carro": "m", "silla": "f", "gato": "m", "perro": "m"
+        ]
+        
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            setupCamera() // Activamos cámara al entrar
+        }
+    
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            stopCamera() // Detenemos al salir
+        }
+    
+        func setupCamera() {
+            guard captureSession == nil else { return } // Evitar duplicación
+    
+            captureSession = AVCaptureSession()
+            captureSession?.sessionPreset = .high
+    
+            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                  let input = try? AVCaptureDeviceInput(device: camera),
+                  let session = captureSession else {
+                print("No se pudo configurar la cámara.")
+                return
+            }
+    
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+    
+            let output = AVCaptureVideoDataOutput()
+            output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+    
+            previewLayer = AVCaptureVideoPreviewLayer(session: session)
+            previewLayer?.videoGravity = .resizeAspectFill
+            previewLayer?.frame = view.bounds
+            if let previewLayer = previewLayer {
+                view.layer.addSublayer(previewLayer)
+            }
+    
+            DispatchQueue.global(qos: .userInitiated).async {
+                session.startRunning()
+            }
+        }
+    
+        func stopCamera() {
+            captureSession?.stopRunning()
+            captureSession = nil
+    
+            DispatchQueue.main.async {
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+            }
+        }
+    
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    
+            let observations = ObjectDetector.shared.detectObjects(pixelBuffer: pixelBuffer)
+            DispatchQueue.main.async {
+                self.drawBoundingBoxes(for: observations)
+                self.announceDetectedObjects(observations)
+            }
+        }
+    
+        func drawBoundingBoxes(for observations: [VNRecognizedObjectObservation]) {
+            DispatchQueue.main.async {
+                self.view.layer.sublayers?.removeSubrange(1...) // Elimina todos menos el previewLayer
+            }
+    
+            for observation in observations {
+                guard let label = observation.labels.first?.identifier,
+                      etiquetasPermitidas.contains(label) else { continue }
+    
+                let boundingBox = observation.boundingBox
+                let frame = CGRect(
+                    x: boundingBox.origin.x * self.view.frame.width,
+                    y: (1 - boundingBox.origin.y - boundingBox.height) * self.view.frame.height,
+                    width: boundingBox.width * self.view.frame.width,
+                    height: boundingBox.height * self.view.frame.height
+                )
+    
+                let boxLayer = CALayer()
+                boxLayer.frame = frame
+                boxLayer.borderColor = UIColor.red.cgColor
+                boxLayer.borderWidth = 2.0
+    
+                let textLayer = CATextLayer()
+                let etiquetaTraducida = traducciones[label] ?? label
+                textLayer.string = etiquetaTraducida.capitalized
+                textLayer.foregroundColor = UIColor.white.cgColor
+                textLayer.fontSize = 14
+                textLayer.frame = CGRect(x: frame.origin.x, y: frame.origin.y - 20, width: frame.width, height: 20)
+                textLayer.backgroundColor = UIColor.black.withAlphaComponent(0.7).cgColor
+                textLayer.alignmentMode = .center
+    
+                DispatchQueue.main.async {
+                    self.view.layer.addSublayer(boxLayer)
+                    self.view.layer.addSublayer(textLayer)
+                }
+            }
+        }
+
+        func announceDetectedObjects(_ observations: [VNRecognizedObjectObservation]) {
+            // Solo ejecuta si estamos en la vista de cámara
+            guard getVistaActiva?() == .camara else { return }
+
+            // Detecta la primera observación válida
+            guard let observation = observations.first(where: { etiquetasPermitidas.contains($0.labels.first?.identifier ?? "") }) else {
+                lastSpokenLabel = nil
+                return
+            }
+
+            // Traduce y construye el mensaje
+            let originalLabel = observation.labels.first?.identifier ?? "Desconocido"
+            guard etiquetasPermitidas.contains(originalLabel) else { return }
+
+            let translatedLabel = traducciones[originalLabel] ?? originalLabel
+            let genero = generos[translatedLabel] ?? "m"
+            let articulo = (genero == "f") ? "una" : "un"
+
+            let mensaje = "Tienes \(articulo) \(translatedLabel) al frente"
+            let utterance = AVSpeechUtterance(string: mensaje)
+            utterance.voice = AVSpeechSynthesisVoice(language: "es-CO")
+            utterance.rate = 0.5
+
+            // Espera un poquito para evitar superposiciones
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !sintetizadorGlobal.isSpeaking {
+                    sintetizadorGlobal.speak(utterance)
+                    self.lastSpokenLabel = translatedLabel
+                }
+            }
+        }
+    }
+}
+
+
+
+//MARK: - YOLO
+class ObjectDetector {
+    static let shared = ObjectDetector()
+    private var model: VNCoreMLModel?
+
+    private init() {
+        guard let mlModel = try? YOLOv3(configuration: .init()).model,
+              let visionModel = try? VNCoreMLModel(for: mlModel) else {
+            print("Error al cargar el modelo ML")
+            return
+        }
+        self.model = visionModel
+    }
+    
+    /// Dice SOLAMENTE estas etiquetas
+    let etiquetasPermitidas: Set<String> = ["person", "car", "chair", "cat", "dog"]
+
+    /// Traduce del inglés al español las etiquetas
+    let traducciones: [String: String] = [
+        "person": "persona",
+        "car": "carro",
+        "chair": "silla",
+        "cat": "gato",
+        "dog": "perro"
+    ]
+
+    /// Indica el género de la palabra en español
+    let generos: [String: String] = [
+        "persona": "f", // femenino
+        "carro": "m",   // masculino
+        "silla": "f",
+        "gato": "m",
+        "perro": "m"
+    ]
+    
+    func detectObjects(pixelBuffer: CVPixelBuffer) -> [VNRecognizedObjectObservation] {
+        guard let model = self.model else { return [] }
+        
+        let request = VNCoreMLRequest(model: model)
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        
+        do {
+            try handler.perform([request])
+            let results = request.results as? [VNRecognizedObjectObservation] ?? []
+
+            /// Solo devuelve resultados filtrados por etiquetasPermitidas
+            let filteredResults = results.filter { result in
+                guard let label = result.labels.first?.identifier else { return false }
+                return etiquetasPermitidas.contains(label)
+            }
+
+            return filteredResults
+        } catch {
+            print("Error al procesar la imagen: \(error)")
+            return []
+        }
+    }
+}
