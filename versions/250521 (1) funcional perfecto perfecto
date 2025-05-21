@@ -1,0 +1,1400 @@
+import Vision
+import CoreML
+import AVFoundation
+import SwiftUI
+import MapKit
+import CoreLocation
+import Combine
+import AVFoundation
+import Speech
+
+let sintetizadorGlobal = AVSpeechSynthesizer()
+
+//MARK: - Vista principal
+struct ContentView: View {
+    enum VistaActiva {
+        case camara, destino, asistente, informacion
+    }
+    
+    @State private var vistaActiva: VistaActiva = .asistente ///Inicia en Asistente
+    @State private var decirPies: String = ""
+    @State private var giro: String = ""
+    @State private var mostrarOpcionesDestino = false
+    @State private var respuestaDeGuia: String = "" ///respuesta del JSON que se pone en el recuadro amarillo
+    @State private var respuestaParaHablar: String = "" ///se prepara la respuesta JSON para ser hablada
+
+    @State private var destinoExpandido = false
+    @State private var destinoSeleccionado = "Destino" ///seleccion del destino desde vista Destinos
+    @State private var destinoDesdeServidor: String = "" ///selecciona el destino desde vista Asistente
+
+    @StateObject private var recognizer = SpeechRecognizer()     ///reconocimiento de voz
+    @StateObject private var compassManager = CompassManager()   ///brujula
+    @StateObject private var locationManager = LocationManager() ///ubicación del dispositivo
+    
+    @State private var grafo = Graph()
+    @State private var puntosConNombre: [Vertex] = []
+    @State private var grafoRuta: [Vertex] = []
+    @State private var rutaAnalizada: [AristaInfo] = []
+    @State private var aristaActualIndex = 0
+    @State private var ultimaInstruccion = ""
+    @State private var tiempoUltimaInstruccion = Date(timeIntervalSince1970: 0)
+    @State private var timerDistancia: Timer?
+
+
+    //let destinosDisponibles = [
+    //    "Destino", "Bloque A", "Bloque B", "Bloque C",
+    //    "Bloque D", "Coliseo", "Biblioteca", "Administración", "Bloque G", "Bloque E", "Bloque F", "Bloque J", "Bloque K", "Oficina de registro", "Oficina de Financiamiento", "Oficina de Bienestar", "Puerta 7", "Puerta 4", "Puerta 11", "Bambú 1", "Bambú 2", "Coliseo",
+    //]
+
+    var body: some View {
+        ZStack {
+            // Vista principal dinámica
+            Group {
+                switch vistaActiva {
+                case .camara:
+                    CameraView(vistaActiva: $vistaActiva)
+                        .edgesIgnoringSafeArea(.all)
+                default:
+                    ZStack {
+                        MapViewRepresentable(
+                            ruta: grafoRuta.map { $0.coordinate },
+                            userLocation: locationManager.userLocation      ///llegue hasta aquiiiiiiiiiiiiiii
+                        )
+                        .edgesIgnoringSafeArea(.all)
+                    }
+                }
+            }
+            
+            /// recuadro de intrucciones
+            if vistaActiva != .informacion {
+                VStack {
+                    VStack(spacing: 10) {
+                        HStack {
+                            if giro.contains("izquierda") {
+                                Image(systemName: "arrow.turn.up.left")
+                                    .foregroundColor(.white)
+                            } else if giro.contains("derecha") {
+                                Image(systemName: "arrow.turn.up.right")
+                                    .foregroundColor(.white)
+                            } else if giro.contains("adelante") {
+                                Image(systemName: "arrow.up")
+                                    .foregroundColor(.white)
+                            } else {
+                                Image(systemName: "arrow.2.circlepath")
+                                    .foregroundColor(.white)
+                            }
+                            
+                            Text(giro.isEmpty ? "Instrucción de giro:" : giro)
+                                .font(.body)
+                                .foregroundColor(.black)
+                                .padding(10)
+                                .background(Color.yellow)
+                                .cornerRadius(20)
+                        }
+                        
+                        HStack {
+                            Image(systemName: "shoeprints.fill")
+                                .foregroundColor(.white)
+                            
+                            Text(decirPies.isEmpty ? "Distancia en pies hasta tu destino:" : decirPies)
+                                .font(.body)
+                                .foregroundColor(.black)
+                                .padding(10)
+                                .background(Color.yellow)
+                                .cornerRadius(20)
+                        }
+                    }
+                    .padding()
+                    .background(Color.black)
+                    .cornerRadius(35)
+                    .shadow(radius: 5)
+                    .padding(.top, 40) // ⬅️ Ajusta según altura del status bar
+                    Spacer() // Esto empuja el bloque hacia arriba
+                }
+            }
+            
+            
+            
+            if vistaActiva == .destino {
+                VStack {
+                    Spacer()
+                    
+                    ZStack(alignment: .bottomTrailing) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Selecciona un destino:")
+                                .font(.footnote)
+                                .foregroundColor(.black)
+                            
+                            if destinoExpandido {
+                                // 🔽 Lista con scroll limitada a 300 px
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        //ForEach(destinosDisponibles, id: \.self) { destino in
+                                        ForEach(puntosConNombre.compactMap { $0.name }, id: \.self) { destino in
+                                            Button(action: {
+                                                destinoSeleccionado = destino
+                                                destinoExpandido = false
+                                            }) {
+                                                Text(destino)
+                                                    .font(.body)
+                                                    .foregroundColor(.black)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .padding(.vertical, 8)
+                                            }
+                                            Rectangle()
+                                                .frame(height: 1)
+                                                .foregroundColor(.black.opacity(0.4))
+                                        }
+                                    }
+                                }
+                                .frame(height: 300)
+                            } else {
+                                //Text(destinoSeleccionado)
+                                Text(destinoSeleccionado.isEmpty ? "Selecciona un destino" : destinoSeleccionado)
+                                    .font(.body)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.black)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .lineLimit(nil)
+                                    .frame(maxWidth: UIScreen.main.bounds.width * 0.65, alignment: .leading)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 40)
+                        .padding(.bottom, 160)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.yellow)
+                        .cornerRadius(60, corners: [.topLeft, .topRight])
+                        .offset(y: 35)
+                        .animation(.easeInOut(duration: 0.3), value: destinoExpandido)
+                        
+                        // 🔁 Botón de flecha
+                        Button(action: {
+                            destinoExpandido.toggle()
+                        }) {
+                            Image(systemName: destinoExpandido ? "arrowtriangle.down.fill" : "arrowtriangle.up.fill")
+                                .font(.system(size: 25))
+                                .foregroundColor(.white)
+                                .padding(20)
+                                .background(Color.black)
+                                .clipShape(Circle())
+                                .shadow(radius: 6)
+                        }
+                        .padding(.trailing, 30)
+                        .padding(.bottom, 110)
+                    }
+                }
+            }
+            
+            
+            // 🟡 Cuadro de asistente dinámico (solo si está activa la vista Asistente)
+            if vistaActiva == .asistente {
+                VStack {
+                    Spacer()
+                    // 🟡 Recuadro amarillo
+                    ZStack(alignment: .bottomTrailing) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Dile a Guía a dónde quieres ir:")
+                                .font(.footnote)
+                                .foregroundColor(.black)
+                            
+                            Text(respuestaDeGuia.isEmpty ? "Hola, soy Guía de Uninorte." : respuestaDeGuia)
+                                .font(.body)
+                                .fontWeight(.bold)
+                                .foregroundColor(.black)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(nil)
+                                .frame(maxWidth: UIScreen.main.bounds.width * 0.60, alignment: .leading)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 40)
+                        .padding(.bottom, 160)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.yellow)
+                        .cornerRadius(60, corners: [.topLeft, .topRight])
+                        .offset(y: 35)
+                        .animation(.easeInOut(duration: 0.3), value: vistaActiva)
+                    }
+                }
+                
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            recognizer.onFinalTexto = { texto in
+
+                                GuiaAPI.shared.enviarMensaje(texto) { respuesta, destino in
+                                    self.respuestaDeGuia = respuesta
+                                    self.respuestaParaHablar = prepararTextoParaHablar(respuesta)
+
+                                    let destinoLimpio = destino.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !destinoLimpio.isEmpty {
+                                        print("📍 Destino desde servidor: \(destinoLimpio)")
+                                        self.destinoDesdeServidor = destinoLimpio
+                                    }
+                                }
+
+
+                            }
+                            
+                            recognizer.comenzarReconocimiento()
+                        }) {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 25))
+                                .foregroundColor(.white)
+                                .padding(20)
+                                .background(recognizer.estaEscuchando ? Color.red : Color.black)
+                                .clipShape(Circle())
+                                .shadow(radius: 6)
+                        }
+                        .padding(.trailing, 30)   // 🔘 Igual que en tu imagen
+                        .padding(.bottom, 110)    // 🔘 Ajustado para flotar justo encima de la barra y el recuadro
+                    }
+                }
+            }
+            
+            
+            
+            
+            // 📖 Información
+            if vistaActiva == .informacion {
+                VStack {
+                    VStack {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 20) {
+                                // Título
+                                Text("Acerca de Guía")
+                                    .font(.title2)
+                                    .bold()
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .foregroundColor(.black)
+
+                                // Descripción
+                                Text("""
+                Guía será tu asistente de navegación por el campus de la Universidad Del Norte.
+
+                Te ayudará a resolver tus dudas de orientación y te guiará hasta tu destino.
+
+                ¡Pregunta lo que sea, Guía te llevará!
+                """)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .foregroundColor(.black)
+
+                                Rectangle()
+                                    .fill(Color.black.opacity(0.4))
+                                    .frame(height: 1)
+                                    .padding(.horizontal, 20)
+
+                                // Subtítulo
+                                Text("Funciones")
+                                    .font(.title2)
+                                    .bold()
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .foregroundColor(.black)
+
+                                // Función 1: Asistente
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "person.wave.2.fill")
+                                        .font(.title2)
+                                        .foregroundColor(.black)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Con Asistente puedes conversar qué quieres hacer en Uninorte.")
+                                            .foregroundColor(.black)
+                                        Text("Ejemplos: Quiero ir a la Oficina de Registro, quiero ir a un salón en específico, quiero hacer un intercambio, quiero comprar un helado.")
+                                            .font(.footnote)
+                                            .foregroundColor(.black.opacity(0.4))
+                                    }
+                                }
+
+                                // Función 2: Destinos
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "map.fill")
+                                        .font(.title2)
+                                        .foregroundColor(.black)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("En Destinos podrás seleccionar un destino establecido y Guía te asistirá hasta tu destino.")
+                                            .foregroundColor(.black)
+                                    }
+                                }
+
+                                // Función 3: Cámara
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "camera.fill")
+                                        .font(.title2)
+                                        .foregroundColor(.black)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Con Cámara escucharás qué tienes delante de ti.")
+                                            .font(.body)
+                                            .foregroundColor(.black)
+                                        Text("Ejemplos: Personas, gatos, perros, sillas o carros.")
+                                            .font(.footnote)
+                                            .foregroundColor(.black.opacity(0.4))
+                                    }
+                                }
+
+                                Rectangle()
+                                    .fill(Color.black.opacity(0.4))
+                                    .frame(height: 1)
+                                    .padding(.horizontal, 20)
+
+                                // Subtítulo
+                                Text("Instrucciones")
+                                    .font(.title2)
+                                    .bold()
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .foregroundColor(.black)
+
+                                Text("""
+                                    Para llegar a tu destino deberás atender a las instrucciones de Guía.
+                                """)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .foregroundColor(.black)
+                                
+                                
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "arrow.2.circlepath")
+                                        .font(.title2)
+                                        .foregroundColor(.black)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Los giros son a la izquierda, sigue adelante, o a la derecha.")
+                                            .foregroundColor(.black)
+                                        Text("Los giros serán de 90 grados.")
+                                            .font(.footnote)
+                                            .foregroundColor(.black.opacity(0.4))
+                                    }
+                                }
+                                
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "shoeprints.fill")
+                                        .font(.title2)
+                                        .foregroundColor(.black)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Los pies calculados es una aproximación al giro más cercano.")
+                                            .foregroundColor(.black)
+                                        Text("No es necesario que los cuentes, solamente está pendiente cuando falten pocos pies para tu próximo giro.")
+                                            .font(.footnote)
+                                            .foregroundColor(.black.opacity(0.4))
+                                    }
+                                }
+                                
+                                
+                                
+                                
+                                
+                                
+                                
+                            }
+                            
+                            .padding()
+                        }
+                    }
+                    .frame(height: 680) // 👈 Altura definida del rectángulo amarillo
+                    .background(Color.yellow)
+                    .cornerRadius(25)
+                    .padding()
+
+                    Spacer()
+                }
+
+
+
+            }
+            
+            // 🔻 Barra inferior con botones
+            VStack {
+                Spacer()
+                ZStack {
+                    Color.black.ignoresSafeArea(edges: .bottom)
+                    
+                    HStack(spacing: 50) {
+                        Button(action: {
+                            vistaActiva = .camara
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 25))
+                                Text("Cámara").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .destino
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "map.fill")
+                                    .font(.system(size: 25))
+                                Text("Destinos").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .asistente
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "person.wave.2.fill")
+                                    .font(.system(size: 25))
+                                Text("Asistente").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                        
+                        Button(action: {
+                            vistaActiva = .informacion
+                        }) {
+                            VStack(spacing: 3) {
+                                Image(systemName: "info.circle.fill")
+                                    .font(.system(size: 25))
+                                Text("Info").font(.caption2)
+                            }
+                            .foregroundColor(.white)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 350)
+                }
+                .frame(height: 90)
+            }
+            
+
+            
+
+        }
+        
+        .onAppear {
+            decirEnVozAlta("Hola!, soy Guía de Uninorte. A dónde quieres ir") // 👋 Saludo inicial
+            //agregue
+            cargarGrafo()
+        }
+
+        .onChange(of: respuestaParaHablar) { _, nueva in
+            if !nueva.isEmpty {
+                print("🗣️ Texto que se va a decir: [\(nueva)]")
+                decirEnVozAlta(nueva)
+            }
+        }
+
+        //agregue
+        .onChange(of: destinoSeleccionado) { _, nuevo in
+            calcularRuta(destino: nuevo)
+        }
+        //agregue
+        .onChange(of: destinoDesdeServidor) { _, nuevo in
+            if !nuevo.isEmpty {
+                destinoSeleccionado = nuevo
+                calcularRuta(destino: nuevo)
+            }
+        }
+        //agregue
+        .onReceive(locationManager.$userLocation.compactMap { $0 }) { _ in
+            verificarGiros()
+        }
+        
+    }
+    
+    
+    
+    //agregue
+    func cargarGrafo() {
+        grafo = GeoJSONGraphBuilder.buildGraph(from: "ComplexLayers")
+        puntosConNombre = grafo.vertices.values.filter { $0.name != nil }
+        if let primero = puntosConNombre.first {
+            destinoSeleccionado = primero.name ?? ""
+        }
+    }
+    
+    //aguregue
+    func calcularRuta(destino: String) {
+        guard let gps = locationManager.userLocation else {
+            return
+        }
+        guard let destino = grafo.vertices.values.first(where: { $0.name == destino }),
+              let inicio = verticeMasCercano(a: gps),
+              let ruta = grafo.shortestPath(from: inicio.coordinate, to: destino.coordinate) else {
+            grafoRuta = []
+            return
+        }
+
+        grafoRuta = ruta
+        rutaAnalizada = []
+        for i in 0..<ruta.count - 1 {
+            let origen = ruta[i].coordinate
+            let destino = ruta[i + 1].coordinate
+
+            let distancia = CLLocation(latitude: origen.latitude, longitude: origen.longitude)
+                .distance(from: CLLocation(latitude: destino.latitude, longitude: destino.longitude))
+            let distanciaPies = distancia * 3.28084
+
+            let deltaLat = destino.latitude - origen.latitude
+            let deltaLon = destino.longitude - origen.longitude
+            let radians = atan2(deltaLon, deltaLat)
+            let degrees = (radians * 180 / .pi).truncatingRemainder(dividingBy: 360)
+            let orientacion = (degrees >= 0) ? degrees : degrees + 360
+
+            let info = AristaInfo(inicio: origen, fin: destino, pies: distanciaPies, orientacion: orientacion)
+            rutaAnalizada.append(info)
+        }
+        aristaActualIndex = 0
+        iniciarTimerDistancia()
+    }
+    
+    //agregue
+    func iniciarTimerDistancia() {
+        timerDistancia?.invalidate()
+        timerDistancia = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { _ in
+            decirEnVozAlta(decirPies)
+        }
+    }
+    
+    //agregue
+    func verificarGiros() {
+        guard let ubicacionActual = locationManager.userLocation,
+              aristaActualIndex < rutaAnalizada.count else { return }
+
+        let arista = rutaAnalizada[aristaActualIndex]
+        let distancia = CLLocation(latitude: ubicacionActual.latitude, longitude: ubicacionActual.longitude)
+            .distance(from: CLLocation(latitude: arista.fin.latitude, longitude: arista.fin.longitude))
+
+        decirPies = String(format: "Sigue adelante, hay %.0f pies hasta tu próximo giro", distancia * 3.28084)
+
+        if distancia < 3.0 {
+            if aristaActualIndex < rutaAnalizada.count - 1 {
+                let orientacionEsperada = rutaAnalizada[aristaActualIndex + 1].orientacion
+                let orientacionUsuario = compassManager.heading
+                let diferencia = normalizarAngulo(orientacionEsperada - orientacionUsuario)
+
+                var instruccion = ""
+                if diferencia > 15 {
+                    instruccion = "Gira a la derecha"
+                } else if diferencia < -15 {
+                    instruccion = "Gira a la izquierda"
+                } else {
+                    instruccion = "Sigue adelante"
+                }
+
+                if instruccion != ultimaInstruccion || Date().timeIntervalSince(tiempoUltimaInstruccion) > 8 {
+                    ultimaInstruccion = instruccion
+                    tiempoUltimaInstruccion = Date()
+                    giro = instruccion
+                    decirEnVozAlta(instruccion)
+                }
+
+            } else {
+                if ultimaInstruccion != "Has llegado a tu destino" {
+                    ultimaInstruccion = "Has llegado a tu destino"
+                    giro = "Has llegado a tu destino"
+                    decirEnVozAlta("Has llegado a tu destino")
+                }
+            }
+            aristaActualIndex += 1
+        }
+    }
+    
+    func normalizarAngulo(_ angulo: Double) -> Double {
+        var a = angulo
+        while a < -180 { a += 360 }
+        while a > 180 { a -= 360 }
+        return a
+    }
+    
+    func verticeMasCercano(a coordenada: CLLocationCoordinate2D) -> Vertex? {
+        grafo.vertices.values.min(by: {
+            let d1 = CLLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
+                .distance(from: CLLocation(latitude: coordenada.latitude, longitude: coordenada.longitude))
+            let d2 = CLLocation(latitude: $1.coordinate.latitude, longitude: $1.coordinate.longitude)
+                .distance(from: CLLocation(latitude: coordenada.latitude, longitude: coordenada.longitude))
+            return d1 < d2
+        })
+    }
+}
+
+
+
+
+
+
+
+
+/// Almacena y recupera el thread_id
+class ThreadIDManager {
+    static let shared = ThreadIDManager()
+    private let key = "thread_id"
+
+    func getThreadID() -> String? {
+        return UserDefaults.standard.string(forKey: key)
+    }
+
+    func setThreadID(_ id: String) {
+        UserDefaults.standard.set(id, forKey: key)
+    }
+}
+
+
+
+
+
+
+
+
+
+
+//MARK: - 6. BRÚJULA
+class CompassManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private var locationManager: CLLocationManager = CLLocationManager()
+    @Published var heading: Double = 0.0
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.headingFilter = kCLHeadingFilterNone
+        locationManager.requestWhenInUseAuthorization()
+        if CLLocationManager.headingAvailable() {
+            locationManager.startUpdatingHeading()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        heading = newHeading.trueHeading > 0 ? newHeading.trueHeading : newHeading.magneticHeading
+    }
+}
+
+
+
+
+//MARK: - MAPA que carga GeoJSON
+struct MapViewRepresentable: UIViewRepresentable {
+    /// Coordenada fija donde siempre estará centrado el mapa
+    //var fixedCenter: CLLocationCoordinate2D
+    //var altitude: CLLocationDistance = 2000  // Puedes cambiar la altura desde afuera
+
+    //agregue
+    var ruta: [CLLocationCoordinate2D]
+    var userLocation: CLLocationCoordinate2D?
+
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView()
+        mapView.delegate = context.coordinator
+
+        mapView.showsUserLocation = true      // Muestra punto azul
+        mapView.mapType = .standard
+        mapView.isZoomEnabled = true
+        mapView.isScrollEnabled = true
+        mapView.isRotateEnabled = true       // No se permite girar
+
+        //cargarGeoJSON(en: mapView)
+
+        return mapView
+    }
+
+    //func updateUIView(_ mapView: MKMapView, context: Context) {
+        // 🎯 Siempre centrado en la misma coordenada, sin rotación
+    //    let camera = MKMapCamera()
+    //    camera.centerCoordinate = fixedCenter
+    //    camera.heading = 0                    // 🧭 Siempre hacia el norte
+    //    camera.pitch = 0
+    //    camera.altitude = altitude
+
+    //    mapView.setCamera(camera, animated: true)
+    //}
+    
+    func updateUIView(_ mapView: MKMapView, context: Context) {
+        mapView.removeOverlays(mapView.overlays)
+        
+        if ruta.count > 1 {
+            let polyline = MKPolyline(coordinates: ruta, count: ruta.count)
+            mapView.addOverlay(polyline)
+            
+            let region = MKCoordinateRegion(
+                center: polyline.coordinate,
+                latitudinalMeters: 500,
+                longitudinalMeters: 500
+            )
+            ///estaba en true, y lo pase a false
+            mapView.setRegion(region, animated: false)
+        } else if let userLoc = userLocation {
+            let region = MKCoordinateRegion(
+                center: userLoc,
+                span: MKCoordinateSpan(latitudeDelta: 0.002, longitudeDelta: 0.002)
+            )
+            mapView.setRegion(region, animated: false)
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+    
+    
+
+    class Coordinator: NSObject, MKMapViewDelegate {
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = .systemBlue
+                renderer.lineWidth = 4
+                return renderer
+            }
+            return MKOverlayRenderer(overlay: overlay)
+        }
+    }
+
+    //func cargarGeoJSON(en mapView: MKMapView) {
+    //    guard let url = Bundle.main.url(forResource: "ComplexLayers", withExtension: "geojson"),
+    //          let data = try? Data(contentsOf: url),
+    //          let features = try? MKGeoJSONDecoder().decode(data) as? [MKGeoJSONFeature] else {
+    //        print("❌ Error cargando GeoJSON.")
+    //        return
+    //    }
+
+    //    for feature in features {
+    //        for geometry in feature.geometry {
+    //            if let polyline = geometry as? MKPolyline {
+    //                mapView.addOverlay(polyline)
+    //            } else if let multiPoint = geometry as? MKMultiPoint {
+    //                let polyline = MKPolyline(points: multiPoint.points(), count: multiPoint.pointCount)
+    //                mapView.addOverlay(polyline)
+    //            }
+    //        }
+    //    }
+    //}
+}
+
+
+
+
+
+
+//MARK: - GPS (modulo para tomar la información del gps)
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var userLocation: CLLocationCoordinate2D?
+    private let locationManager = CLLocationManager()
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        locationManager.activityType = .fitness
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.startUpdatingLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        userLocation = locations.last?.coordinate
+    }
+}
+
+
+
+//MARK: - Carga el grafo desde un archivo GeoJSON
+class GeoJSONGraphBuilder {
+    static func buildGraph(from nombreArchivo: String) -> Graph {
+        let grafo = Graph()
+
+        guard let url = Bundle.main.url(forResource: nombreArchivo, withExtension: "geojson"),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let features = json["features"] as? [[String: Any]] else {
+            print("❌ Error al leer el archivo GeoJSON")
+            return grafo
+        }
+
+        for feature in features {
+            guard let geometry = feature["geometry"] as? [String: Any],
+                  let type = geometry["type"] as? String else { continue }
+
+            if type == "LineString", let coords = geometry["coordinates"] as? [[Double]] {
+                var prevVertex: Vertex?
+                for coord in coords {
+                    let punto = CLLocationCoordinate2D(latitude: coord[1], longitude: coord[0])
+                    let vertice = grafo.getOrCreateVertex(for: punto)
+                    if let anterior = prevVertex {
+                        grafo.connect(anterior, vertice)
+                    }
+                    prevVertex = vertice
+                }
+            }
+
+            if type == "Point", let coord = geometry["coordinates"] as? [Double] {
+                let punto = CLLocationCoordinate2D(latitude: coord[1], longitude: coord[0])
+                let nombre = (feature["properties"] as? [String: Any])?["name"] as? String
+                _ = grafo.getOrCreateVertex(for: punto, name: nombre)
+            }
+        }
+
+        return grafo
+    }
+}
+
+
+//MARK: - Arista entre dos nodos del grafo
+struct AristaInfo: Identifiable {
+    let id = UUID()
+    let inicio: CLLocationCoordinate2D
+    let fin: CLLocationCoordinate2D
+    let pies: Double
+    let orientacion: Double
+}
+
+//MARK: - Nodo del grafo
+class Vertex: Hashable, Identifiable {
+    let id = UUID()
+    let coordinate: CLLocationCoordinate2D
+    var name: String?
+    var neighbors: [Vertex] = []
+
+    init(coordinate: CLLocationCoordinate2D, name: String? = nil) {
+        self.coordinate = coordinate
+        self.name = name
+    }
+
+    static func == (lhs: Vertex, rhs: Vertex) -> Bool {
+        lhs.coordinate.latitude == rhs.coordinate.latitude &&
+        lhs.coordinate.longitude == rhs.coordinate.longitude
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(coordinate.latitude)
+        hasher.combine(coordinate.longitude)
+    }
+}
+
+//MARK: - Grafo con algoritmo de Dijkstra
+class Graph {
+    var vertices: [String: Vertex] = [:]
+
+    func key(for coordinate: CLLocationCoordinate2D) -> String {
+        "\(coordinate.latitude),\(coordinate.longitude)"
+    }
+
+    func getOrCreateVertex(for coordinate: CLLocationCoordinate2D, name: String? = nil) -> Vertex {
+        let k = key(for: coordinate)
+        if let existente = vertices[k] {
+            if let nuevoNombre = name {
+                existente.name = nuevoNombre
+            }
+            return existente
+        } else {
+            let vertice = Vertex(coordinate: coordinate, name: name)
+            vertices[k] = vertice
+            return vertice
+        }
+    }
+
+    func connect(_ v1: Vertex, _ v2: Vertex) {
+        if !v1.neighbors.contains(v2) { v1.neighbors.append(v2) }
+        if !v2.neighbors.contains(v1) { v2.neighbors.append(v1) }
+    }
+
+    func shortestPath(from startCoord: CLLocationCoordinate2D, to endCoord: CLLocationCoordinate2D) -> [Vertex]? {
+        let start = getOrCreateVertex(for: startCoord)
+        let end = getOrCreateVertex(for: endCoord)
+
+        var distances: [Vertex: Double] = [:]
+        var previous: [Vertex: Vertex] = [:]
+        var unvisited: Set<Vertex> = Set(vertices.values)
+
+        for vertex in unvisited {
+            distances[vertex] = .infinity
+        }
+        distances[start] = 0
+
+        while !unvisited.isEmpty {
+            let current = unvisited.min { distances[$0, default: .infinity] < distances[$1, default: .infinity] }!
+            unvisited.remove(current)
+
+            if current == end {
+                var path: [Vertex] = []
+                var u: Vertex? = end
+                while let actual = u {
+                    path.insert(actual, at: 0)
+                    u = previous[actual]
+                }
+                return path
+            }
+
+            for neighbor in current.neighbors {
+                if !unvisited.contains(neighbor) { continue }
+                let tentative = distances[current, default: .infinity] + distance(from: current, to: neighbor)
+                if tentative < distances[neighbor, default: .infinity] {
+                    distances[neighbor] = tentative
+                    previous[neighbor] = current
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func distance(from v1: Vertex, to v2: Vertex) -> Double {
+        let loc1 = CLLocation(latitude: v1.coordinate.latitude, longitude: v1.coordinate.longitude)
+        let loc2 = CLLocation(latitude: v2.coordinate.latitude, longitude: v2.coordinate.longitude)
+        return loc1.distance(from: loc2)
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//MARK: - CAMARA
+struct CameraView: UIViewControllerRepresentable {
+    @Binding var vistaActiva: ContentView.VistaActiva
+
+    func makeUIViewController(context: Context) -> CameraViewController {
+        let controller = CameraViewController()
+        controller.getVistaActiva = { self.vistaActiva }
+        return controller
+    }
+    func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {
+        uiViewController.getVistaActiva = { self.vistaActiva }
+    }
+    class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
+        var captureSession: AVCaptureSession?
+        var previewLayer: AVCaptureVideoPreviewLayer?
+        var lastSpokenLabel: String?
+        
+        var getVistaActiva: (() -> ContentView.VistaActiva)? // 👈 Aquí recibimos el estado actual
+
+    
+        let etiquetasPermitidas: Set<String> = ["person", "car", "chair", "cat", "dog"]
+        let traducciones: [String: String] = [
+            "person": "persona", "car": "carro", "chair": "silla", "cat": "gato", "dog": "perro"
+        ]
+        let generos: [String: String] = [
+            "persona": "f", "carro": "m", "silla": "f", "gato": "m", "perro": "m"
+        ]
+        
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            setupCamera() // Activamos cámara al entrar
+        }
+    
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            stopCamera() // Detenemos al salir
+        }
+    
+        func setupCamera() {
+            guard captureSession == nil else { return } // Evitar duplicación
+    
+            captureSession = AVCaptureSession()
+            captureSession?.sessionPreset = .high
+    
+            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                  let input = try? AVCaptureDeviceInput(device: camera),
+                  let session = captureSession else {
+                print("No se pudo configurar la cámara.")
+                return
+            }
+    
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+    
+            let output = AVCaptureVideoDataOutput()
+            output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+    
+            previewLayer = AVCaptureVideoPreviewLayer(session: session)
+            previewLayer?.videoGravity = .resizeAspectFill
+            previewLayer?.frame = view.bounds
+            if let previewLayer = previewLayer {
+                view.layer.addSublayer(previewLayer)
+            }
+    
+            DispatchQueue.global(qos: .userInitiated).async {
+                session.startRunning()
+            }
+        }
+    
+        func stopCamera() {
+            captureSession?.stopRunning()
+            captureSession = nil
+    
+            DispatchQueue.main.async {
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+            }
+        }
+    
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    
+            let observations = ObjectDetector.shared.detectObjects(pixelBuffer: pixelBuffer)
+            DispatchQueue.main.async {
+                self.drawBoundingBoxes(for: observations)
+                self.announceDetectedObjects(observations)
+            }
+        }
+    
+        func drawBoundingBoxes(for observations: [VNRecognizedObjectObservation]) {
+            DispatchQueue.main.async {
+                self.view.layer.sublayers?.removeSubrange(1...) // Elimina todos menos el previewLayer
+            }
+    
+            for observation in observations {
+                guard let label = observation.labels.first?.identifier,
+                      etiquetasPermitidas.contains(label) else { continue }
+    
+                let boundingBox = observation.boundingBox
+                let frame = CGRect(
+                    x: boundingBox.origin.x * self.view.frame.width,
+                    y: (1 - boundingBox.origin.y - boundingBox.height) * self.view.frame.height,
+                    width: boundingBox.width * self.view.frame.width,
+                    height: boundingBox.height * self.view.frame.height
+                )
+    
+                let boxLayer = CALayer()
+                boxLayer.frame = frame
+                boxLayer.borderColor = UIColor.red.cgColor
+                boxLayer.borderWidth = 2.0
+    
+                let textLayer = CATextLayer()
+                let etiquetaTraducida = traducciones[label] ?? label
+                textLayer.string = etiquetaTraducida.capitalized
+                textLayer.foregroundColor = UIColor.white.cgColor
+                textLayer.fontSize = 14
+                textLayer.frame = CGRect(x: frame.origin.x, y: frame.origin.y - 20, width: frame.width, height: 20)
+                textLayer.backgroundColor = UIColor.black.withAlphaComponent(0.7).cgColor
+                textLayer.alignmentMode = .center
+    
+                DispatchQueue.main.async {
+                    self.view.layer.addSublayer(boxLayer)
+                    self.view.layer.addSublayer(textLayer)
+                }
+            }
+        }
+
+        func announceDetectedObjects(_ observations: [VNRecognizedObjectObservation]) {
+            // Solo ejecuta si estamos en la vista de cámara
+            guard getVistaActiva?() == .camara else { return }
+
+            // Detecta la primera observación válida
+            guard let observation = observations.first(where: { etiquetasPermitidas.contains($0.labels.first?.identifier ?? "") }) else {
+                lastSpokenLabel = nil
+                return
+            }
+
+            // Traduce y construye el mensaje
+            let originalLabel = observation.labels.first?.identifier ?? "Desconocido"
+            guard etiquetasPermitidas.contains(originalLabel) else { return }
+
+            let translatedLabel = traducciones[originalLabel] ?? originalLabel
+            let genero = generos[translatedLabel] ?? "m"
+            let articulo = (genero == "f") ? "una" : "un"
+
+            let mensaje = "Tienes \(articulo) \(translatedLabel) al frente"
+            let utterance = AVSpeechUtterance(string: mensaje)
+            utterance.voice = AVSpeechSynthesisVoice(language: "es-CO")
+            utterance.rate = 0.5
+
+            // Espera un poquito para evitar superposiciones
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !sintetizadorGlobal.isSpeaking {
+                    sintetizadorGlobal.speak(utterance)
+                    self.lastSpokenLabel = translatedLabel
+                }
+            }
+        }
+    }
+}
+
+
+//MARK: - YOLO
+class ObjectDetector {
+    static let shared = ObjectDetector()
+    private var model: VNCoreMLModel?
+
+    private init() {
+        guard let mlModel = try? YOLOv3(configuration: .init()).model,
+              let visionModel = try? VNCoreMLModel(for: mlModel) else {
+            print("Error al cargar el modelo ML")
+            return
+        }
+        self.model = visionModel
+    }
+    
+    /// Dice SOLAMENTE estas etiquetas
+    let etiquetasPermitidas: Set<String> = ["person", "car", "chair", "cat", "dog"]
+
+    /// Traduce del inglés al español las etiquetas
+    let traducciones: [String: String] = [
+        "person": "persona",
+        "car": "carro",
+        "chair": "silla",
+        "cat": "gato",
+        "dog": "perro"
+    ]
+
+    /// Indica el género de la palabra en español
+    let generos: [String: String] = [
+        "persona": "f", // femenino
+        "carro": "m",   // masculino
+        "silla": "f",
+        "gato": "m",
+        "perro": "m"
+    ]
+    
+    func detectObjects(pixelBuffer: CVPixelBuffer) -> [VNRecognizedObjectObservation] {
+        guard let model = self.model else { return [] }
+        
+        let request = VNCoreMLRequest(model: model)
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        
+        do {
+            try handler.perform([request])
+            let results = request.results as? [VNRecognizedObjectObservation] ?? []
+
+            /// Solo devuelve resultados filtrados por etiquetasPermitidas
+            let filteredResults = results.filter { result in
+                guard let label = result.labels.first?.identifier else { return false }
+                return etiquetasPermitidas.contains(label)
+            }
+
+            return filteredResults
+        } catch {
+            print("Error al procesar la imagen: \(error)")
+            return []
+        }
+    }
+}
+
+
+//MARK: - 5. (no se toca, funciona perfecto) COMUNICACION CON EL SERVIDOR
+class GuiaAPI {
+    static let shared = GuiaAPI()
+    
+    private let url = URL(string: "http://54.147.252.121:2500/ask")! // <- Cambia esta IP
+
+    func enviarMensaje(_ mensaje: String, completion: @escaping (_ response: String, _ destino: String) -> Void) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var json: [String: Any] = ["prompt": mensaje]
+        
+        // 👉 Incluir thread_id si existe
+        if let threadID = ThreadIDManager.shared.getThreadID() {
+            json["thread_id"] = threadID
+        }
+
+        let jsonData = try? JSONSerialization.data(withJSONObject: json)
+        request.httpBody = jsonData
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data else {
+                print("❌ Sin datos: \(error?.localizedDescription ?? "error desconocido")")
+                completion("No se recibió respuesta.", "")
+                return
+            }
+
+            do {
+                if let respuesta = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let mensajeRespuesta = respuesta["response"] as? String {
+
+                    let destino = respuesta["destino"] as? String ?? ""
+                    let nuevoThreadID = respuesta["thread_id"] as? String
+
+                    // 👉 Guardar nuevo thread_id si no hay uno anterior
+                    if ThreadIDManager.shared.getThreadID() == nil, let nuevo = nuevoThreadID {
+                        ThreadIDManager.shared.setThreadID(nuevo)
+                        print("📌 Nuevo thread_id guardado: \(nuevo)")
+                    }
+
+                    DispatchQueue.main.async {
+                        let limpio = mensajeRespuesta.components(separatedBy: "{\"destino\"").first ?? mensajeRespuesta
+                        let respuestaLimpia = limpio.trimmingCharacters(in: .whitespacesAndNewlines)
+                        completion(respuestaLimpia, destino)
+                    }
+                } else {
+                    print("⚠️ JSON inesperado: \(String(data: data, encoding: .utf8) ?? "sin texto")")
+                    completion("Respuesta no entendida.", "")
+                }
+            } catch {
+                print("❌ Error al parsear JSON: \(error.localizedDescription)")
+                completion("Error al interpretar respuesta.", "")
+            }
+        }.resume()
+    }
+}
+
+//MARK: - 4. (no se toca, funciona perfecto) DEL JSON, TOMA SOLAMENTE EL "response", LO LIMPIA Y LO PREPARA LA DICTAR
+func prepararTextoParaHablar(_ texto: String) -> String {
+    let limpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // Elimina caracteres invisibles o de control (como \u{200B}, \u{FEFF}, etc)
+    let textoFiltrado = limpio.unicodeScalars.filter { scalar in
+        !(CharacterSet.controlCharacters.contains(scalar) || scalar == "\u{200B}" || scalar == "\u{FEFF}")
+    }
+
+    return String(String.UnicodeScalarView(textoFiltrado))
+}
+
+//MARK: - 3. (no se toca, funciona perfecto) DICTADO POR VOZ
+func decirEnVozAlta(_ texto: String) {
+    let textoLimpio = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !textoLimpio.isEmpty else { return }
+
+    let utterance = AVSpeechUtterance(string: textoLimpio)
+    utterance.voice = AVSpeechSynthesisVoice(language: "es-CO")
+    utterance.rate = 0.5
+
+    DispatchQueue.main.async {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+            try session.setActive(true)
+        } catch {
+            print("⚠️ Error al configurar la sesión de audio: \(error)")
+        }
+
+        sintetizadorGlobal.stopSpeaking(at: .immediate)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            sintetizadorGlobal.speak(utterance)
+        }
+    }
+}
+
+//MARK: - 2. (no se toca, funciona perfecto) RECONOCIMIENTO DE VOZ
+class SpeechRecognizer: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "es"))!
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
+
+    private var silencioTimer: Timer?
+    private let tiempoSilencio: TimeInterval = 1  // segundos sin hablar = silencio
+
+    private var yaSeRespondio = false
+
+    
+    @Published var estaEscuchando = false  // 👈 Añadido
+    
+    @Published var textoReconocido = ""
+    var onFinalTexto: ((String) -> Void)?  // Este callback se llama cuando termina
+
+    func comenzarReconocimiento() {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            guard authStatus == .authorized else {
+                print("Permiso no autorizado.")
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.estaEscuchando = true // 👂 Comienza a escuchar
+                self.empezarGrabacion()
+            }
+        }
+    }
+
+    func empezarGrabacion() {
+        
+        yaSeRespondio = false
+        
+        if audioEngine.isRunning {
+            detenerReconocimiento()
+            return
+        }
+
+        request = SFSpeechAudioBufferRecognitionRequest()
+        let inputNode = audioEngine.inputNode
+
+        guard let request = request else { return }
+
+        request.shouldReportPartialResults = true
+
+        recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+            if let result = result {
+                let nuevoTexto = result.bestTranscription.formattedString
+                self.textoReconocido = nuevoTexto
+                self.reiniciarTimerSilencio()
+            }
+
+            if let error = error {
+                print("Error: \(error.localizedDescription)")
+                self.detenerReconocimiento()
+            }
+        }
+
+        let formato = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: formato) { buffer, _ in
+            self.request?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try? audioEngine.start()
+    }
+
+    func detenerReconocimiento() {
+        audioEngine.stop()
+        request?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        self.estaEscuchando = false // 🔇 Deja de escuchar
+        reconocimientoFinalizado()
+    }
+
+    func reiniciarTimerSilencio() {
+        silencioTimer?.invalidate()
+        silencioTimer = Timer.scheduledTimer(withTimeInterval: tiempoSilencio, repeats: false) { _ in
+            self.detenerReconocimiento()
+        }
+    }
+
+    func reconocimientoFinalizado() {
+        DispatchQueue.main.async {
+            let textoFinal = self.textoReconocido.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !textoFinal.isEmpty {
+                
+                print("🎤 Texto reconocido final: \(textoFinal)")
+
+                
+                if !self.yaSeRespondio {
+                    self.yaSeRespondio = true
+                    self.onFinalTexto?(textoFinal)
+                }
+            }
+        }
+    }
+}
+
+//MARK: - 1.2 (no se toca, funciona perfecto) BORDES REDONDOS EN EL FRONT PARA EL RECUADRO AMARILLO
+struct RoundedCorner: Shape {
+    var radius: CGFloat = .infinity
+    var corners: UIRectCorner = .allCorners
+
+    func path(in rect: CGRect) -> Path {
+        let path = UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners,
+            cornerRadii: CGSize(width: radius, height: radius)
+        )
+        return Path(path.cgPath)
+    }
+}
+//MARK: - 1.1 (no se toca, funciona perfecto) BORDES REDONDOS EN EL FRONT PARA EL RECUADRO AMARILLO
+extension View {
+    func cornerRadius(_ radius: CGFloat, corners: UIRectCorner) -> some View {
+        clipShape(RoundedCorner(radius: radius, corners: corners))
+    }
+}
